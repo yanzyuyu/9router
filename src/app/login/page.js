@@ -39,17 +39,24 @@ export default function LoginPage() {
 
         if (res.ok) {
           const data = await res.json();
-          if (data.authenticated === true || data.requireLogin === false) {
-            window.location.assign("/dashboard");
-            return;
-          }
-          setHasPassword(Boolean(data.hasPassword));
+          const configured = Boolean(data.hasPassword);
+          setHasPassword(configured);
           setAuthMode(data.authMode || "password");
           setSsoType(data.ssoType || "oidc");
           setOidcConfigured(data.oidcConfigured === true);
           setOidcLoginLabel(data.oidcLoginLabel || "Sign in with OIDC");
           setSamlConfigured(data.samlConfigured === true);
           setSamlLoginLabel(data.samlLoginLabel || "Sign in with SAML SSO");
+
+          if (configured && (data.authenticated === true || data.requireLogin === false)) {
+            const redirectCount = parseInt(sessionStorage.getItem("login_redirects") || "0", 10);
+            if (redirectCount < 2) {
+              sessionStorage.setItem("login_redirects", String(redirectCount + 1));
+              window.location.assign("/dashboard");
+              return;
+            }
+          }
+          sessionStorage.removeItem("login_redirects");
         } else {
           setHasPassword(true);
         }
@@ -66,6 +73,7 @@ export default function LoginPage() {
     setLoading(true);
     setError("");
     setResetHint("");
+    sessionStorage.removeItem("login_redirects");
 
     try {
       const res = await fetch("/api/auth/login", {
@@ -98,6 +106,7 @@ export default function LoginPage() {
     e.preventDefault();
     setLoading(true);
     setError("");
+    sessionStorage.removeItem("login_redirects");
 
     try {
       const res = await fetch("/api/init", {
@@ -123,6 +132,7 @@ export default function LoginPage() {
     e.preventDefault();
     setLoading(true);
     setError("");
+    sessionStorage.removeItem("login_redirects");
     try {
       const res = await fetch("/api/settings", {
         method: "PATCH",
