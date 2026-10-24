@@ -5,6 +5,9 @@ const os = require("os");
 const APP_NAME = "9router";
 
 function defaultDir() {
+  if (process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME) {
+    return path.join("/tmp", `.${APP_NAME}`);
+  }
   if (process.platform === "win32") {
     return path.join(process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming"), APP_NAME);
   }
@@ -18,8 +21,7 @@ function getDataDir() {
     fs.mkdirSync(configured, { recursive: true });
     return configured;
   } catch (e) {
-    if (e?.code === "EACCES" || e?.code === "EPERM") {
-      console.warn(`[DATA_DIR] '${configured}' not writable → fallback ~/.${APP_NAME}`);
+    if (e?.code === "EACCES" || e?.code === "EPERM" || e?.code === "EROFS") {
       return defaultDir();
     }
     throw e;
