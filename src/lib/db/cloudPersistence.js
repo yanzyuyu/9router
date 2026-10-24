@@ -35,6 +35,25 @@ export async function prepareCloudDatabase(targetFilePath, force = false) {
     }
   }
 
+  const blobToken = process.env.BLOB_READ_WRITE_TOKEN;
+  if (blobToken) {
+    try {
+      const { get } = await import("@vercel/blob");
+      const blob = await get("data.sqlite", { access: "private", token: blobToken });
+      if (blob && blob.statusCode === 200) {
+        const arrayBuf = await new Response(blob.stream).arrayBuffer();
+        if (arrayBuf.byteLength > 0) {
+          fs.writeFileSync(targetFilePath, Buffer.from(arrayBuf));
+          return;
+        }
+      }
+    } catch (e) {
+      if (!e.message?.includes("could not be found")) {
+        console.warn(`[DB][Cloud] blob restore failed: ${e.message}`);
+      }
+    }
+  }
+
   const kvUrl = process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL;
   const kvToken = process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN;
   if (kvUrl && kvToken) {
@@ -198,6 +217,21 @@ export async function syncCloudDatabaseNow(filePath) {
   const buffer = fs.readFileSync(filePath);
   const b64 = buffer.toString("base64");
 
+  const blobToken = process.env.BLOB_READ_WRITE_TOKEN;
+  if (blobToken) {
+    try {
+      const { put } = await import("@vercel/blob");
+      await put("data.sqlite", buffer, {
+        access: "private",
+        addRandomSuffix: false,
+        contentType: "application/x-sqlite3",
+        token: blobToken,
+      });
+    } catch (e) {
+      console.warn(`[DB][Cloud] blob sync failed: ${e.message}`);
+    }
+  }
+
   const kvUrl = process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL;
   const kvToken = process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN;
   if (kvUrl && kvToken) {
@@ -260,6 +294,7 @@ export async function syncCloudDatabaseNow(filePath) {
 
 export function scheduleCloudSync(filePath) {
   const hasCloudTarget = Boolean(
+    process.env.BLOB_READ_WRITE_TOKEN ||
     (process.env.KV_REST_API_URL && process.env.KV_REST_API_TOKEN) ||
     (process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN) ||
     (process.env.GITHUB_GIST_ID && (process.env.GITHUB_GIST_TOKEN || process.env.GITHUB_TOKEN)) ||
