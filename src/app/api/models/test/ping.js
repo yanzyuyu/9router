@@ -43,8 +43,6 @@ async function getInternalHeaders() {
   let apiKey = null;
   try {
     const keys = await getApiKeys();
-    // Prefer an unrestricted key so a dashboard model test is not refused just
-    // because the first key happens to be restricted.
     const activeKeys = keys.filter((k) => k.isActive !== false);
     apiKey = (activeKeys.find((k) => !k.access?.restricted) || activeKeys[0])?.key || null;
   } catch {}
@@ -55,12 +53,20 @@ async function getInternalHeaders() {
   return headers;
 }
 
-export async function pingModelByKind(model, kind, baseUrl = `http://127.0.0.1:${process.env.PORT || UPDATER_CONFIG.appPort}`) {
+function getResolvedBaseUrl(overrideUrl) {
+  if (overrideUrl && !overrideUrl.includes("127.0.0.1")) return overrideUrl;
+  if (process.env.VERCEL_PROJECT_PRODUCTION_URL) return `https://${process.env.VERCEL_PROJECT_PRODUCTION_URL}`;
+  if (process.env.VERCEL_URL) return `https://${process.env.VERCEL_URL}`;
+  return overrideUrl || `http://127.0.0.1:${process.env.PORT || UPDATER_CONFIG.appPort}`;
+}
+
+export async function pingModelByKind(model, kind, baseUrl = null) {
+  const targetBaseUrl = getResolvedBaseUrl(baseUrl);
   const headers = await getInternalHeaders();
   const start = Date.now();
 
   if (kind === "embedding") {
-    const res = await fetch(`${baseUrl}/api/v1/embeddings`, {
+    const res = await fetch(`${targetBaseUrl}/api/v1/embeddings`, {
       method: "POST",
       headers,
       body: JSON.stringify({ model, input: "test" }),
@@ -83,7 +89,7 @@ export async function pingModelByKind(model, kind, baseUrl = `http://127.0.0.1:$
   }
 
   if (kind === "image") {
-    const res = await fetch(`${baseUrl}/api/v1/images/generations`, {
+    const res = await fetch(`${targetBaseUrl}/api/v1/images/generations`, {
       method: "POST",
       headers,
       body: JSON.stringify({ model, prompt: "test" }),
@@ -112,7 +118,7 @@ export async function pingModelByKind(model, kind, baseUrl = `http://127.0.0.1:$
     form.append("file", sampleAudio, "test.wav");
     form.append("model", model);
 
-    const res = await fetch(`${baseUrl}/api/v1/audio/transcriptions`, {
+    const res = await fetch(`${targetBaseUrl}/api/v1/audio/transcriptions`, {
       method: "POST",
       headers: Object.fromEntries(Object.entries(headers).filter(([key]) => key.toLowerCase() !== "content-type")),
       body: form,
@@ -136,7 +142,7 @@ export async function pingModelByKind(model, kind, baseUrl = `http://127.0.0.1:$
   }
 
   if (kind === "systemone") {
-    const res = await fetch(`${baseUrl}/api/v1/systemone`, {
+    const res = await fetch(`${targetBaseUrl}/api/v1/systemone`, {
       method: "POST",
       headers,
       body: JSON.stringify({
@@ -165,15 +171,11 @@ export async function pingModelByKind(model, kind, baseUrl = `http://127.0.0.1:$
     return { ok: true, latencyMs, error: null, status: res.status };
   }
 
-  const res = await fetch(`${baseUrl}/api/v1/chat/completions`, {
+  const res = await fetch(`${targetBaseUrl}/api/v1/chat/completions`, {
     method: "POST",
     headers,
     body: JSON.stringify({
       model,
-      // 1024 tokens: reasoning models (ClinePass/kimi-k3, deepseek-v4-pro, etc.) spend
-      // their budget on chain-of-thought before emitting an answer. A tiny probe like
-      // max_tokens:16 starves the answer and yields a false "no choices" failure.
-      // See issue #3010.
       max_tokens: 1024,
       stream: false,
       messages: [{ role: "user", content: "hi" }],
@@ -186,8 +188,6 @@ export async function pingModelByKind(model, kind, baseUrl = `http://127.0.0.1:$
   let parsed = null;
   try { parsed = rawText ? JSON.parse(rawText) : null; } catch {}
 
-  // Unwrap before the choices checks below. No-op for providers that do not
-  // opt in via transport.quirks.clineEnvelope.
   const providerId = resolveProviderId(String(model).split("/")[0]);
   parsed = unwrapClineEnvelope(parsed, providerId);
 
@@ -223,9 +223,6 @@ export async function pingModelByKind(model, kind, baseUrl = `http://127.0.0.1:$
 
   const hasChoices = Array.isArray(parsed?.choices) && parsed.choices.length > 0;
 
-  // Soft-pass (issue #3010): a reasoning model may burn its whole budget on
-  // chain-of-thought and return finish_reason:"length" with empty content but
-  // non-empty reasoning/thinking. That's a successful connection, not a failure.
   const firstChoice = parsed?.choices?.[0] || {};
   const hasReasoning =
     firstChoice.message?.reasoning ||

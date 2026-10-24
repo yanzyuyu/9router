@@ -13,10 +13,11 @@ const ENV_PROVIDERS = [
   { env: "XAI_API_KEY", provider: "xai" },
 ];
 
-let syncTimer = null;
+let isSyncing = false;
+let pendingSync = false;
 
-export async function prepareCloudDatabase(targetFilePath) {
-  if (fs.existsSync(targetFilePath)) return;
+export async function prepareCloudDatabase(targetFilePath, force = false) {
+  if (!force && fs.existsSync(targetFilePath)) return;
 
   const targetDir = path.dirname(targetFilePath);
   if (!fs.existsSync(targetDir)) {
@@ -31,6 +32,52 @@ export async function prepareCloudDatabase(targetFilePath) {
       return;
     } catch (e) {
       console.warn(`[DB][Cloud] base64 restore failed: ${e.message}`);
+    }
+  }
+
+  const kvUrl = process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL;
+  const kvToken = process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN;
+  if (kvUrl && kvToken) {
+    try {
+      const res = await fetch(`${kvUrl.replace(/\/$/, "")}/get/ninerouter_db_b64`, {
+        headers: { Authorization: `Bearer ${kvToken}` },
+        signal: AbortSignal.timeout(8000),
+      });
+      if (res.ok) {
+        const payload = await res.json();
+        const b64 = payload?.result;
+        if (typeof b64 === "string" && b64.length > 0) {
+          fs.writeFileSync(targetFilePath, Buffer.from(b64, "base64"));
+          return;
+        }
+      }
+    } catch (e) {
+      console.warn(`[DB][Cloud] kv restore failed: ${e.message}`);
+    }
+  }
+
+  const gistToken = process.env.GITHUB_GIST_TOKEN || process.env.GITHUB_TOKEN;
+  const gistId = process.env.GITHUB_GIST_ID;
+  if (gistToken && gistId) {
+    try {
+      const res = await fetch(`https://api.github.com/gists/${gistId}`, {
+        headers: {
+          Authorization: `Bearer ${gistToken}`,
+          Accept: "application/vnd.github+json",
+          "User-Agent": "9router-serverless",
+        },
+        signal: AbortSignal.timeout(8000),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        const content = data.files?.["9router_db.sqlite.b64"]?.content;
+        if (content) {
+          fs.writeFileSync(targetFilePath, Buffer.from(content, "base64"));
+          return;
+        }
+      }
+    } catch (e) {
+      console.warn(`[DB][Cloud] gist restore failed: ${e.message}`);
     }
   }
 
@@ -146,27 +193,93 @@ export async function seedFromEnv(adapter) {
   }
 }
 
-export function scheduleCloudSync(filePath) {
-  const syncUrl = process.env.DATABASE_SYNC_URL;
-  if (!syncUrl) return;
+export async function syncCloudDatabaseNow(filePath) {
+  if (!fs.existsSync(filePath)) return;
+  const buffer = fs.readFileSync(filePath);
+  const b64 = buffer.toString("base64");
 
-  if (syncTimer) clearTimeout(syncTimer);
-  syncTimer = setTimeout(async () => {
-    syncTimer = null;
+  const kvUrl = process.env.KV_REST_API_URL || process.env.UPSTASH_REDIS_REST_URL;
+  const kvToken = process.env.KV_REST_API_TOKEN || process.env.UPSTASH_REDIS_REST_TOKEN;
+  if (kvUrl && kvToken) {
     try {
-      if (!fs.existsSync(filePath)) return;
-      const data = fs.readFileSync(filePath);
+      await fetch(`${kvUrl.replace(/\/$/, "")}/set/ninerouter_db_b64`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${kvToken}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(b64),
+        signal: AbortSignal.timeout(10000),
+      });
+    } catch (e) {
+      console.warn(`[DB][Cloud] kv sync failed: ${e.message}`);
+    }
+  }
+
+  const gistToken = process.env.GITHUB_GIST_TOKEN || process.env.GITHUB_TOKEN;
+  const gistId = process.env.GITHUB_GIST_ID;
+  if (gistToken && gistId) {
+    try {
+      await fetch(`https://api.github.com/gists/${gistId}`, {
+        method: "PATCH",
+        headers: {
+          Authorization: `Bearer ${gistToken}`,
+          Accept: "application/vnd.github+json",
+          "Content-Type": "application/json",
+          "User-Agent": "9router-serverless",
+        },
+        body: JSON.stringify({
+          files: {
+            "9router_db.sqlite.b64": { content: b64 },
+          },
+        }),
+        signal: AbortSignal.timeout(10000),
+      });
+    } catch (e) {
+      console.warn(`[DB][Cloud] gist sync failed: ${e.message}`);
+    }
+  }
+
+  const syncUrl = process.env.DATABASE_SYNC_URL;
+  if (syncUrl) {
+    try {
       const headers = { "Content-Type": "application/octet-stream" };
       const syncKey = process.env.DATABASE_SYNC_KEY;
       if (syncKey) headers["Authorization"] = `Bearer ${syncKey}`;
       await fetch(syncUrl, {
         method: "PUT",
         headers,
-        body: data,
+        body: buffer,
         signal: AbortSignal.timeout(15000),
       });
     } catch (e) {
       console.warn(`[DB][Cloud] sync upload failed: ${e.message}`);
     }
-  }, 2000);
+  }
+}
+
+export function scheduleCloudSync(filePath) {
+  const hasCloudTarget = Boolean(
+    (process.env.KV_REST_API_URL && process.env.KV_REST_API_TOKEN) ||
+    (process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN) ||
+    (process.env.GITHUB_GIST_ID && (process.env.GITHUB_GIST_TOKEN || process.env.GITHUB_TOKEN)) ||
+    process.env.DATABASE_SYNC_URL
+  );
+  if (!hasCloudTarget) return;
+
+  if (isSyncing) {
+    pendingSync = true;
+    return;
+  }
+
+  isSyncing = true;
+  syncCloudDatabaseNow(filePath)
+    .catch(() => {})
+    .finally(() => {
+      isSyncing = false;
+      if (pendingSync) {
+        pendingSync = false;
+        scheduleCloudSync(filePath);
+      }
+    });
 }

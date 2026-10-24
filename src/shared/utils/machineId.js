@@ -11,10 +11,12 @@ const CLI_AUTH_SALT = '9r-cli-auth';
 let cachedRawId = null;
 let cachedCliSecret = null;
 
-// Persist raw machine ID to file → guarantees CLI/server/middleware see same value
-// even when machineIdSync fails or returns inconsistent values across runtimes.
 function loadRawMachineId() {
   if (cachedRawId) return cachedRawId;
+  if (process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME) {
+    cachedRawId = process.env.VERCEL_PROJECT_ID || process.env.API_KEY || '9router-serverless-machine-id';
+    return cachedRawId;
+  }
   try {
     cachedRawId = fs.readFileSync(MACHINE_ID_FILE, 'utf8').trim();
     if (cachedRawId) return cachedRawId;
@@ -31,9 +33,12 @@ function loadRawMachineId() {
   return cachedRawId;
 }
 
-// Random secret persisted on first run → unpredictable CLI token even when machineId leaks.
 function loadCliSecret() {
   if (cachedCliSecret) return cachedCliSecret;
+  if (process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME) {
+    cachedCliSecret = process.env.JWT_SECRET || process.env.VERCEL_PROJECT_ID || '9router-serverless-cli-secret';
+    return cachedCliSecret;
+  }
   try {
     cachedCliSecret = fs.readFileSync(CLI_SECRET_FILE, 'utf8').trim();
     if (cachedCliSecret) return cachedCliSecret;
@@ -57,10 +62,6 @@ export async function getRawMachineId() {
   return loadRawMachineId();
 }
 
-/**
- * Check if we're running in browser or server environment
- * @returns {boolean} True if in browser, false if in server
- */
 export function isBrowser() {
   return typeof window !== 'undefined';
 }
