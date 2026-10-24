@@ -224,6 +224,7 @@ export async function syncCloudDatabaseNow(filePath) {
       await put("data.sqlite", buffer, {
         access: "private",
         addRandomSuffix: false,
+        allowOverwrite: true,
         contentType: "application/x-sqlite3",
         token: blobToken,
       });
